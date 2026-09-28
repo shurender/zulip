@@ -1,9 +1,12 @@
+from collections import defaultdict
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 from unittest import mock
 
 import orjson
 import time_machine
+from django.db import transaction
+from django.http import HttpResponse
 from django.utils.timezone import now as timezone_now
 
 from zerver.actions.create_realm import do_create_realm
@@ -33,9 +36,10 @@ from zerver.actions.users import do_deactivate_user
 from zerver.lib.create_user import create_user
 from zerver.lib.exceptions import JsonableError
 from zerver.lib.mention import silent_mention_syntax_for_user
+from zerver.lib.response import json_success
 from zerver.lib.streams import ensure_stream
 from zerver.lib.test_classes import ZulipTestCase
-from zerver.lib.test_helpers import most_recent_usermessage
+from zerver.lib.test_helpers import HostRequestMock, most_recent_usermessage
 from zerver.lib.timestamp import datetime_to_timestamp
 from zerver.lib.types import GroupPermissionSetting, UserGroupMembersData, UserGroupMembersDict
 from zerver.lib.user_groups import (
@@ -52,6 +56,7 @@ from zerver.lib.user_groups import (
     get_subgroup_ids,
     get_system_user_group_by_name,
     get_user_group_member_ids,
+    get_user_id_annotated_recursive_membership_groups_for_users,
     has_user_group_access_for_subgroup,
     is_any_user_in_group,
     is_user_in_group,
@@ -70,6 +75,7 @@ from zerver.models import (
 )
 from zerver.models.groups import SystemGroups, get_realm_system_groups_name_dict
 from zerver.models.realms import get_realm
+from zerver.views.user_groups import compose_views
 
 
 class UserGroupTestCase(ZulipTestCase):
@@ -810,6 +816,37 @@ class UserGroupTestCase(ZulipTestCase):
 
         with self.assertRaises(JsonableError):
             user_group_ids_to_user_groups([hamletcharacters_group.id, admins_group.id], realm)
+
+    def test_user_id_annotated_recursive_membership_groups_for_users(self) -> None:
+        iago = self.example_user("iago")
+        hamlet = self.example_user("hamlet")
+        polonius = self.example_user("polonius")
+
+        self.assert_length(get_user_id_annotated_recursive_membership_groups_for_users([]), 0)
+
+        group_memberships = get_user_id_annotated_recursive_membership_groups_for_users(
+            [iago.id, hamlet.id, polonius.id]
+        )
+        membership_dict = defaultdict(list)
+        for membership in group_memberships:
+            membership_dict[membership.user_id].append(membership.id)  # type: ignore[attr-defined]  # user_id is an annotated field.
+
+        # We just want to ensure that get_user_id_annotated_recursive_membership_groups_for_users
+        # returns the user ID annotated queryset for all recursive membership groups for
+        # users and we keep the test simple by just comparing the values with
+        # get_recursive_membership_groups which is already tested well enough.
+        self.assertCountEqual(
+            membership_dict[iago.id],
+            list(get_recursive_membership_groups(iago).values_list("id", flat=True)),
+        )
+        self.assertCountEqual(
+            membership_dict[hamlet.id],
+            list(get_recursive_membership_groups(hamlet).values_list("id", flat=True)),
+        )
+        self.assertCountEqual(
+            membership_dict[polonius.id],
+            list(get_recursive_membership_groups(polonius).values_list("id", flat=True)),
+        )
 
 
 class UserGroupAPITestCase(UserGroupTestCase):
@@ -2244,6 +2281,36 @@ class UserGroupAPITestCase(UserGroupTestCase):
 
         self.assert_length(all_user_ids, 102)
         self.assert_user_membership(user_group, [hamlet, cordelia, *new_users, *original_users])
+
+    def test_compose_views_rollback(self) -> None:
+        """
+        The compose_views function() is used under the hood by
+        zerver.views.user_groups.  It's a pretty simple method in terms of
+        control flow, but it uses a Django rollback, which may make it brittle
+        code when we upgrade Django.  We test the functions's rollback logic
+        here with a simple scenario to avoid false positives related to
+        subscription complications.
+        """
+        user_profile = self.example_user("hamlet")
+        user_profile.full_name = "Hamlet"
+        user_profile.save()
+        request = HostRequestMock(user_profile=user_profile)
+
+        def thunk1() -> HttpResponse:
+            user_profile.full_name = "Should not be committed"
+            user_profile.save()
+            return json_success(request)
+
+        def thunk2() -> HttpResponse:
+            raise JsonableError("random failure")
+
+        with transaction.atomic(savepoint=True), self.assertRaises(JsonableError):
+            # The atomic() wrapper helps to avoid JsonableError breaking
+            # the test's transaction.
+            compose_views([thunk1, thunk2])
+
+        user_profile = self.example_user("hamlet")
+        self.assertEqual(user_profile.full_name, "Hamlet")
 
     def test_update_members_of_user_group(self) -> None:
         hamlet = self.example_user("hamlet")

@@ -189,22 +189,13 @@ export function is_in_focus(): boolean {
     );
 }
 
-export function find_element_at_point(
-    x: number,
-    y: number,
-    container_selector: string,
-): Element | undefined {
-    // When the view is obscured by a modal, overlay, popover, etc.
-    // `elementFromPoint` would return the covering element. Use
-    // `elementsFromPoint` to search through the full element stack
-    // and find the matching element beneath it.
-    const elements = document.elementsFromPoint(x, y);
-    for (const element of elements) {
-        if (element.closest(container_selector) !== null) {
-            return element;
-        }
-    }
-    return undefined;
+export function find_first_row_index_at_or_below(rows: Element[], y: number): number | undefined {
+    // Returns the index of the first row whose bottom edge is below
+    // the viewport coordinate `y` (the row containing `y`, or else the
+    // first row below it), or undefined if there is none. Assumes
+    // `rows` are in top-to-bottom order and don't overlap.
+    const index = rows.findIndex((row) => row.getBoundingClientRect().bottom > y);
+    return index === -1 ? undefined : index;
 }
 
 export function is_scroll_position_for_render(): boolean {

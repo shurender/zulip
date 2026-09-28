@@ -579,7 +579,7 @@ class MessageMoveTopicTest(ZulipTestCase):
         # state + 1/user with a UserTopic row for the events data)
         # beyond what is typical were there not UserTopic records to
         # update. Ideally, we'd eliminate the per-user component.
-        with self.assert_database_query_count(24):
+        with self.assert_database_query_count(26):
             check_update_message(
                 user_profile=hamlet,
                 message_id=message_id,
@@ -676,7 +676,7 @@ class MessageMoveTopicTest(ZulipTestCase):
         set_topic_visibility_policy(desdemona, muted_topics, UserTopic.VisibilityPolicy.MUTED)
         set_topic_visibility_policy(cordelia, muted_topics, UserTopic.VisibilityPolicy.MUTED)
 
-        with self.assert_database_query_count(25):
+        with self.assert_database_query_count(27):
             check_update_message(
                 user_profile=desdemona,
                 message_id=message_id,
@@ -706,7 +706,7 @@ class MessageMoveTopicTest(ZulipTestCase):
         ]
         set_topic_visibility_policy(desdemona, muted_topics, UserTopic.VisibilityPolicy.MUTED)
         set_topic_visibility_policy(cordelia, muted_topics, UserTopic.VisibilityPolicy.MUTED)
-        with self.assert_database_query_count(31):
+        with self.assert_database_query_count(34):
             check_update_message(
                 user_profile=desdemona,
                 message_id=message_id,
@@ -739,7 +739,7 @@ class MessageMoveTopicTest(ZulipTestCase):
         set_topic_visibility_policy(desdemona, muted_topics, UserTopic.VisibilityPolicy.MUTED)
         set_topic_visibility_policy(cordelia, muted_topics, UserTopic.VisibilityPolicy.MUTED)
 
-        with self.assert_database_query_count(28):
+        with self.assert_database_query_count(30):
             check_update_message(
                 user_profile=desdemona,
                 message_id=message_id,
@@ -758,28 +758,84 @@ class MessageMoveTopicTest(ZulipTestCase):
         assert_is_topic_muted(cordelia, new_public_stream.id, "changed topic name", muted=True)
         assert_is_topic_muted(aaron, new_public_stream.id, "changed topic name", muted=False)
 
-        # Moving only half the messages doesn't move UserTopic records.
-        second_message_id = self.send_stream_message(
-            hamlet, stream_name, topic_name="changed topic name", content="Second message"
+    def test_move_topic_to_private_stream_migrates_policy_by_content_access(self) -> None:
+        # When a topic is moved to a channel, its visibility policies are
+        # migrated for exactly the users who have content access to the
+        # target channel.
+        hamlet = self.example_user("hamlet")
+        desdemona = self.example_user("desdemona")
+        othello = self.example_user("othello")
+        cordelia = self.example_user("cordelia")
+        iago = self.example_user("iago")
+
+        stream_name = "public source"
+        stream = self.make_stream(stream_name)
+        self.subscribe(hamlet, stream_name)
+        self.login_user(hamlet)
+        message_id = self.send_stream_message(
+            hamlet, stream_name, topic_name="topic", content="Hello World"
         )
-        with self.assert_database_query_count(22):
-            check_update_message(
-                user_profile=desdemona,
-                message_id=second_message_id,
-                stream_id=new_public_stream.id,
-                topic_name="final topic name",
-                propagate_mode="change_later",
-                send_notification_to_old_thread=False,
-                send_notification_to_new_thread=False,
-                content=None,
+
+        # A private channel with protected history.
+        private_stream = self.make_stream(
+            "private target", invite_only=True, history_public_to_subscribers=False
+        )
+        self.subscribe(desdemona, private_stream.name)
+        # Othello has content access to the target via subscription.
+        self.subscribe(othello, private_stream.name)
+        # Cordelia has content access via a content-access group,
+        # without being subscribed to the target.
+        content_access_group = check_add_user_group(
+            hamlet.realm, "target-content-access", [cordelia], acting_user=hamlet
+        )
+        do_change_stream_group_based_setting(
+            private_stream,
+            "can_add_subscribers_group",
+            content_access_group,
+            acting_user=desdemona,
+        )
+
+        # None of Othello, Cordelia, or Iago is subscribed to the source
+        # channel.
+        muted_topics = [[stream_name, "topic"]]
+        for user in [othello, cordelia, iago]:
+            set_topic_visibility_policy(user, muted_topics, UserTopic.VisibilityPolicy.MUTED)
+
+        check_update_message(
+            user_profile=desdemona,
+            message_id=message_id,
+            stream_id=private_stream.id,
+            propagate_mode="change_all",
+            send_notification_to_old_thread=False,
+            send_notification_to_new_thread=False,
+            content=None,
+        )
+
+        # Othello and Cordelia keep the UserTopic row, migrated to
+        # the private channel.
+        for user in [othello, cordelia]:
+            self.assertFalse(
+                UserTopic.objects.filter(
+                    user_profile=user, stream=stream.id, topic_name="topic"
+                ).exists()
+            )
+            self.assertTrue(
+                topic_has_visibility_policy(
+                    user, private_stream.id, "topic", UserTopic.VisibilityPolicy.MUTED
+                )
             )
 
-        assert_is_topic_muted(desdemona, new_public_stream.id, "changed topic name", muted=True)
-        assert_is_topic_muted(cordelia, new_public_stream.id, "changed topic name", muted=True)
-        assert_is_topic_muted(aaron, new_public_stream.id, "changed topic name", muted=False)
-        assert_is_topic_muted(desdemona, new_public_stream.id, "final topic name", muted=False)
-        assert_is_topic_muted(cordelia, new_public_stream.id, "final topic name", muted=False)
-        assert_is_topic_muted(aaron, new_public_stream.id, "final topic name", muted=False)
+        # Iago has no content access, so the UserTopic row is removed.
+        self.assertFalse(
+            UserTopic.objects.filter(
+                user_profile=iago, stream=stream.id, topic_name="topic"
+            ).exists()
+        )
+        self.assertFalse(
+            UserTopic.objects.filter(
+                user_profile=iago, stream=private_stream.id, topic_name="topic"
+            ).exists()
+        )
 
     @mock.patch("zerver.actions.user_topics.send_event_on_commit")
     def test_edit_unmuted_topic(self, mock_send_event_on_commit: mock.MagicMock) -> None:
@@ -841,7 +897,7 @@ class MessageMoveTopicTest(ZulipTestCase):
             users_to_be_notified_via_muted_topics_event.append(user_topic.user_profile_id)
 
         change_all_topic_name = "Topic 1 edited"
-        with self.assert_database_query_count(29):
+        with self.assert_database_query_count(31):
             check_update_message(
                 user_profile=hamlet,
                 message_id=message_id,
@@ -915,6 +971,109 @@ class MessageMoveTopicTest(ZulipTestCase):
         self.assert_has_visibility_policy(
             aaron, change_all_topic_name, stream, UserTopic.VisibilityPolicy.MUTED, expected=False
         )
+
+    def test_visibility_policy_partial_topic_move(self) -> None:
+        # We don't need to test each stream type variation (public, private,
+        # cross-stream, etc.) since those are already covered by the full
+        # topic move tests above. This single test verifies the two key
+        # behaviors unique to partial moves:
+        # 1. Policies on the original topic are NOT removed (remain unchanged).
+        # 2. Only moved message participant policies are updated on the target topic.
+        # This includes senders, mentioned users, reaction senders, and
+        # submessage senders in the moved messages.
+        stream_name = "Stream 123"
+        stream = self.make_stream(stream_name)
+
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+        aaron = self.example_user("aaron")
+        othello = self.example_user("othello")
+        desdemona = self.example_user("desdemona")
+        iago = self.example_user("iago")
+
+        for user in [hamlet, cordelia, aaron, othello, desdemona, iago]:
+            self.subscribe(user, stream_name)
+
+        self.send_stream_message(
+            cordelia, stream_name, topic_name="partial move topic", content="First message"
+        )
+        second_message_id = self.send_stream_message(
+            hamlet,
+            stream_name,
+            topic_name="partial move topic",
+            content=f"Second message @**{aaron.full_name}**",
+        )
+
+        check_add_reaction(
+            user_profile=desdemona,
+            message_id=second_message_id,
+            emoji_name="smile",
+            emoji_code=None,
+            reaction_type=None,
+        )
+        do_add_submessage(
+            realm=iago.realm,
+            sender_id=iago.id,
+            message_id=second_message_id,
+            msg_type="whatever",
+            content='"stuff"',
+        )
+
+        # Distribute all four visibility policies among the participants of the moved message:
+        # hamlet (sender) -- UNMUTED, aaron (mentioned) -- MUTED, iago (submessage) -- FOLLOWED,
+        # desdemona (reaction) -- INHERIT (by default).
+        for user, policy in [
+            (hamlet, UserTopic.VisibilityPolicy.UNMUTED),
+            (aaron, UserTopic.VisibilityPolicy.MUTED),
+            (iago, UserTopic.VisibilityPolicy.FOLLOWED),
+        ]:
+            set_topic_visibility_policy(user, [[stream_name, "partial move topic"]], policy)
+
+        # Non-participants cordelia (only on first message) and othello (no stake in moved message)
+        # have MUTED on the original topic.
+        for user in [cordelia, othello]:
+            set_topic_visibility_policy(
+                user, [[stream_name, "partial move topic"]], UserTopic.VisibilityPolicy.MUTED
+            )
+
+        with self.assert_database_query_count(33):
+            check_update_message(
+                user_profile=hamlet,
+                message_id=second_message_id,
+                stream_id=None,
+                topic_name="final topic name",
+                propagate_mode="change_later",
+                send_notification_to_old_thread=False,
+                send_notification_to_new_thread=False,
+                content=None,
+            )
+
+        # Visibility policy for all users on the original topic should remain unchanged.
+        for user, policy in [
+            (hamlet, UserTopic.VisibilityPolicy.UNMUTED),
+            (aaron, UserTopic.VisibilityPolicy.MUTED),
+            (iago, UserTopic.VisibilityPolicy.FOLLOWED),
+            (desdemona, UserTopic.VisibilityPolicy.INHERIT),
+            (cordelia, UserTopic.VisibilityPolicy.MUTED),
+            (othello, UserTopic.VisibilityPolicy.MUTED),
+        ]:
+            self.assert_has_visibility_policy(user, "partial move topic", stream, policy)
+
+        # Moved message participants should have their policy on the target topic.
+        for user, policy in [
+            (hamlet, UserTopic.VisibilityPolicy.UNMUTED),
+            (aaron, UserTopic.VisibilityPolicy.MUTED),
+            (iago, UserTopic.VisibilityPolicy.FOLLOWED),
+            (desdemona, UserTopic.VisibilityPolicy.INHERIT),
+        ]:
+            self.assert_has_visibility_policy(user, "final topic name", stream, policy)
+
+        # cordelia (only on first message) and othello (no stake in moved message)
+        # should NOT have policies on the target topic.
+        for user in [cordelia, othello]:
+            self.assert_has_visibility_policy(
+                user, "final topic name", stream, UserTopic.VisibilityPolicy.INHERIT
+            )
 
     def test_merge_user_topic_states_on_move_messages(self) -> None:
         stream_name = "Stream 123"

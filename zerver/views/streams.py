@@ -1,9 +1,7 @@
 import time
 from collections import defaultdict
-from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
-import orjson
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.db import transaction
@@ -568,49 +566,8 @@ class AddSubscriptionData(BaseModel):
     @model_validator(mode="after")
     def validate_terms(self) -> "AddSubscriptionData":
         if self.color is not None:
-            self.color = check_color("add.color", self.color)
+            self.color = check_color("color", self.color)
         return self
-
-
-@typed_endpoint
-def update_subscriptions_backend(
-    request: HttpRequest,
-    user_profile: UserProfile,
-    *,
-    add: Json[list[AddSubscriptionData]] | None = None,
-    delete: Json[list[str]] | None = None,
-) -> HttpResponse:
-    if delete is None:
-        delete = []
-    if add is None:
-        add = []
-    if not add and not delete:
-        raise JsonableError(_('Nothing to do. Specify at least one of "add" or "delete".'))
-
-    thunks = [
-        lambda: add_subscriptions_backend(request, user_profile, streams_raw=add),
-        lambda: remove_subscriptions_backend(request, user_profile, streams_raw=delete),
-    ]
-    data = compose_views(thunks)
-
-    return json_success(request, data)
-
-
-def compose_views(thunks: list[Callable[[], HttpResponse]]) -> dict[str, Any]:
-    """
-    This takes a series of thunks and calls them in sequence, and it
-    smushes all the json results into a single response when
-    everything goes right.  (This helps clients avoid extra latency
-    hops.)  It rolls back the transaction when things go wrong in any
-    one of the composed methods.
-    """
-
-    json_dict: dict[str, Any] = {}
-    with transaction.atomic(savepoint=False):
-        for thunk in thunks:
-            response = thunk()
-            json_dict.update(orjson.loads(response.content))
-    return json_dict
 
 
 @typed_endpoint

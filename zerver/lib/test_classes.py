@@ -8,7 +8,7 @@ import tempfile
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Union, cast
+from typing import TYPE_CHECKING, Any, Union
 from unittest import TestResult, mock, skipUnless
 from urllib.parse import parse_qs, quote, urlencode
 
@@ -764,7 +764,7 @@ Output:
     def _get_page_params(self, result: "TestHttpResponse") -> dict[str, Any]:
         """Helper for parsing page_params after fetching the web app's home view."""
         doc = lxml.html.document_fromstring(result.content)
-        div = cast(lxml.html.HtmlMixin, doc).get_element_by_id("page-params")
+        div = doc.get_element_by_id("page-params")
         assert div is not None
         page_params_json = div.get("data-params")
         assert page_params_json is not None
@@ -774,10 +774,10 @@ Output:
     def _get_sentry_params(self, response: "TestHttpResponse") -> dict[str, Any] | None:
         doc = lxml.html.document_fromstring(response.content)
         try:
-            script = cast(lxml.html.HtmlMixin, doc).get_element_by_id("sentry-params")
+            script = doc.get_element_by_id("sentry-params")
         except KeyError:
             return None
-        assert script is not None and script.text is not None
+        assert script.text is not None
         return orjson.loads(script.text)
 
     def check_rendered_logged_in_app(self, result: "TestHttpResponse") -> None:
@@ -1988,8 +1988,8 @@ Output:
             plan=plan,
             is_renewal=True,
             event_time=timezone_now(),
-            licenses=licenses,
-            licenses_at_next_renewal=licenses_at_next_renewal,
+            workplace_licenses=licenses,
+            workplace_licenses_at_next_renewal=licenses_at_next_renewal,
         )
         realm.plan_type = Realm.PLAN_TYPE_STANDARD
         realm.save(update_fields=["plan_type"])
@@ -2629,6 +2629,7 @@ You can fix this by adding "{complete_event_type}" to ALL_EVENT_TYPES for this w
         expected_message: str | None = None,
         content_type: str | None = "application/json",
         expect_noop: bool = False,
+        custom_payload: str | dict[str, Any] | None = None,
         **extra: str,
     ) -> None:
         """
@@ -2650,10 +2651,20 @@ You can fix this by adding "{complete_event_type}" to ALL_EVENT_TYPES for this w
         see send_and_test_private_message.
 
         When no message is expected to be sent, set `expect_noop` to True.
+
+        Pass `custom_payload` to send something other than the fixture's
+        contents. This should be a version of the named fixture passed to
+        this function, that has been edited to exercise a different value
+        of a field, so that we don't need a near-duplicate fixture for it.
+        A dict also bypasses any `get_payload` override defined by the
+        test class.
         """
         self.subscribe(self.test_user, self.channel_name)
 
-        payload = self.get_payload(fixture_name)
+        if custom_payload is not None:
+            payload = custom_payload
+        else:
+            payload = self.get_payload(fixture_name)
         if content_type is not None:
             extra["content_type"] = content_type
         headers = call_fixture_to_headers(self.webhook_dir_name, fixture_name)

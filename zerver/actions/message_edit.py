@@ -8,7 +8,7 @@ from typing import Any
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q, QuerySet
+from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.utils.timezone import now as timezone_now
 from django.utils.translation import gettext as _
 from django.utils.translation import gettext_lazy
@@ -45,6 +45,7 @@ from zerver.lib.message import (
     check_user_group_mention_allowed,
     event_recipient_ids_for_action_on_messages,
     normalize_body,
+    should_change_visibility_policy,
     stream_wildcard_mention_allowed,
     topic_wildcard_mention_allowed,
     truncate_topic,
@@ -63,6 +64,7 @@ from zerver.lib.streams import (
     check_stream_access_based_on_can_send_message_group,
     get_stream_topics_policy,
     notify_stream_is_recently_active_update,
+    user_has_content_access,
 )
 from zerver.lib.string_validation import check_stream_topic
 from zerver.lib.thumbnail import manifest_and_get_user_upload_previews, rewrite_thumbnailed_images
@@ -83,7 +85,10 @@ from zerver.lib.topic import (
 from zerver.lib.topic_link_util import get_stream_topic_link_syntax
 from zerver.lib.types import DirectMessageEditRequest, EditHistoryEvent, StreamMessageEditRequest
 from zerver.lib.url_encoding import stream_message_url
-from zerver.lib.user_groups import UserGroupMembershipDetails
+from zerver.lib.user_groups import (
+    UserGroupMembershipDetails,
+    get_user_id_annotated_recursive_membership_groups_for_users,
+)
 from zerver.lib.user_message import bulk_insert_all_ums
 from zerver.lib.user_topics import get_users_with_user_topic_visibility_policy
 from zerver.lib.widget import is_widget_message
@@ -629,26 +634,73 @@ def update_user_topic_visibility_policies_on_move(
     target_stream: Stream,
     target_topic_name: str,
     target_topic_has_messages: bool,
-    users_losing_access: Iterable[UserProfile],
+    remove_orig_topic_visibility_policy: bool,
+    filter_to_user_ids: set[int] | None = None,
 ) -> dict[UserProfile, int]:
     stream_inaccessible_to_user_profiles: list[UserProfile] = []
     orig_topic_user_profile_to_visibility_policy: dict[UserProfile, int] = {}
     target_topic_user_profile_to_visibility_policy: dict[UserProfile, int] = {}
-    user_ids_losing_access = {user.id for user in users_losing_access}
 
-    for user_topic in get_users_with_user_topic_visibility_policy(
+    orig_topic_user_topics_query = get_users_with_user_topic_visibility_policy(
         stream_being_edited.id, orig_topic_name
-    ):
-        if is_stream_edited and user_topic.user_profile_id in user_ids_losing_access:
-            stream_inaccessible_to_user_profiles.append(user_topic.user_profile)
+    )
+    target_topic_user_topics_query = get_users_with_user_topic_visibility_policy(
+        target_stream.id, target_topic_name
+    )
+    if filter_to_user_ids is not None:
+        orig_topic_user_topics_query = orig_topic_user_topics_query.filter(
+            user_profile_id__in=filter_to_user_ids
+        )
+        target_topic_user_topics_query = target_topic_user_topics_query.filter(
+            user_profile_id__in=filter_to_user_ids
+        )
+
+    # We annotate whether each user is subscribed to the target
+    # channel, so user_has_content_access below needs no extra
+    # per-user or subscriber query.
+    assert target_stream.recipient_id is not None
+    orig_topic_user_topics = list(
+        orig_topic_user_topics_query.annotate(
+            is_target_stream_subscriber=Exists(
+                Subscription.objects.filter(
+                    recipient_id=target_stream.recipient_id,
+                    user_profile_id=OuterRef("user_profile_id"),
+                    active=True,
+                )
+            )
+        )
+    )
+
+    recursive_group_ids_by_user: dict[int, set[int]] = {}
+    if is_stream_edited and not target_stream.is_public():
+        # Do not compute group memberships for public streams as it
+        # is required only to check content access to private streams.
+        for group in get_user_id_annotated_recursive_membership_groups_for_users(
+            [user_topic.user_profile_id for user_topic in orig_topic_user_topics]
+        ):
+            recursive_group_ids_by_user.setdefault(group.user_id, set()).add(group.id)  # type: ignore[attr-defined]  # user_id is an annotated field.
+
+    for orig_user_topic in orig_topic_user_topics:
+        user_profile = orig_user_topic.user_profile
+        if is_stream_edited and not user_has_content_access(
+            user_profile,
+            target_stream,
+            UserGroupMembershipDetails(
+                user_recursive_group_ids=recursive_group_ids_by_user.get(user_profile.id, set())
+            ),
+            is_subscribed=orig_user_topic.is_target_stream_subscriber,
+        ):
+            # A topic visibility policy is migrated to the target channel
+            # only for users who have content access to it. Users without
+            # content access have their policy removed instead, so we never
+            # leave a UserTopic row referencing a channel they cannot access.
+            stream_inaccessible_to_user_profiles.append(user_profile)
         else:
-            orig_topic_user_profile_to_visibility_policy[user_topic.user_profile] = (
-                user_topic.visibility_policy
+            orig_topic_user_profile_to_visibility_policy[user_profile] = (
+                orig_user_topic.visibility_policy
             )
 
-    for user_topic in get_users_with_user_topic_visibility_policy(
-        target_stream.id, target_topic_name
-    ):
+    for user_topic in target_topic_user_topics_query:
         target_topic_user_profile_to_visibility_policy[user_topic.user_profile] = (
             user_topic.visibility_policy
         )
@@ -684,18 +736,19 @@ def update_user_topic_visibility_policies_on_move(
             (orig_topic_visibility_policy, target_topic_visibility_policy)
         ].append(user_profile_with_policy)
 
-    # If the messages are being moved to a stream the user
-    # cannot access, then we treat this as the
-    # messages/topic being deleted for this user. This is
-    # important for security reasons; we don't want to
-    # give users a UserTopic row in a stream they cannot
-    # access. Remove the user topic rows for such users.
-    bulk_do_set_user_topic_visibility_policy(
-        stream_inaccessible_to_user_profiles,
-        stream_being_edited,
-        orig_topic_name,
-        visibility_policy=UserTopic.VisibilityPolicy.INHERIT,
-    )
+    if remove_orig_topic_visibility_policy:
+        # If the messages are being moved to a stream the user
+        # cannot access, then we treat this as the
+        # messages/topic being deleted for this user. This is
+        # important for security reasons; we don't want to
+        # give users a UserTopic row in a stream they cannot
+        # access. Remove the user topic rows for such users.
+        bulk_do_set_user_topic_visibility_policy(
+            stream_inaccessible_to_user_profiles,
+            stream_being_edited,
+            orig_topic_name,
+            visibility_policy=UserTopic.VisibilityPolicy.INHERIT,
+        )
 
     # A case-only rename within the same channel resolves to the
     # same UserTopic rows for both the original and target topic,
@@ -723,7 +776,10 @@ def update_user_topic_visibility_policies_on_move(
     ) in user_profiles_for_visibility_policy_pair.items():
         orig_topic_visibility_policy, target_topic_visibility_policy = visibility_policy_pair
 
-        if orig_topic_visibility_policy != UserTopic.VisibilityPolicy.INHERIT:
+        if (
+            remove_orig_topic_visibility_policy
+            and orig_topic_visibility_policy != UserTopic.VisibilityPolicy.INHERIT
+        ):
             bulk_do_set_user_topic_visibility_policy(
                 user_profiles,
                 stream_being_edited,
@@ -814,16 +870,12 @@ def apply_automatic_unmute_follow_topics_policy(
     target_stream: Stream,
     target_topic_name: str,
 ) -> None:
+    visibility_policy = None
     if (
         user_profile.automatically_follow_topics_policy
         == UserProfile.AUTOMATICALLY_CHANGE_VISIBILITY_POLICY_ON_INITIATION
     ):
-        bulk_do_set_user_topic_visibility_policy(
-            [user_profile],
-            target_stream,
-            target_topic_name,
-            visibility_policy=UserTopic.VisibilityPolicy.FOLLOWED,
-        )
+        visibility_policy = UserTopic.VisibilityPolicy.FOLLOWED
     elif (
         user_profile.automatically_unmute_topics_in_muted_streams_policy
         == UserProfile.AUTOMATICALLY_CHANGE_VISIBILITY_POLICY_ON_INITIATION
@@ -836,12 +888,24 @@ def apply_automatic_unmute_follow_topics_policy(
         ).first()
 
         if subscription is not None and subscription.is_muted:
-            bulk_do_set_user_topic_visibility_policy(
-                [user_profile],
-                target_stream,
-                target_topic_name,
-                visibility_policy=UserTopic.VisibilityPolicy.UNMUTED,
-            )
+            visibility_policy = UserTopic.VisibilityPolicy.UNMUTED
+
+    # These automatic policies may only increase the user's visibility
+    # policy for the topic. In particular, the partial-move logic above
+    # may already have carried the user's FOLLOWED policy over from the
+    # original topic, and we must not downgrade that to UNMUTED.
+    if visibility_policy is not None and should_change_visibility_policy(
+        visibility_policy,
+        user_profile,
+        target_stream.id,
+        target_topic_name,
+    ):
+        bulk_do_set_user_topic_visibility_policy(
+            [user_profile],
+            target_stream,
+            target_topic_name,
+            visibility_policy=visibility_policy,
+        )
 
 
 # This must be called already in a transaction, with a write lock on
@@ -1173,7 +1237,26 @@ def do_update_message(
     # in the organization (too expansive, and also not what we do for
     # newly sent messages anyway) and having magical live-updates
     # where possible.
-    users_to_be_notified = list(map(user_info, unmodified_user_messages))
+    #
+    # Only notify users who can currently access the (possibly moved)
+    # messages. A UserMessage row by itself does not grant access, so
+    # notifying every UserMessage-row holder would leak the edited
+    # content to users who have lost access.
+    #
+    # TODO: We can improve some unnecessary computation that is being
+    # done currently as event_recipient_ids_for_action_on_messages
+    # also computes UserMessage rows and the target stream subscribers.
+    message_access_user_ids = event_recipient_ids_for_action_on_messages(
+        changed_message_ids,
+        is_channel_message=True,
+        channel=message_edit_request.target_stream,
+        exclude_long_term_idle_users=False,
+    )
+    users_to_be_notified = [
+        user_info(um)
+        for um in unmodified_user_messages
+        if um.user_profile_id in message_access_user_ids
+    ]
     if stream_being_edited.is_history_public_to_subscribers():
         subscriptions = get_active_subscriptions_for_stream_id(
             message_edit_request.target_stream.id, include_deactivated_users=False
@@ -1185,13 +1268,10 @@ def do_update_message(
             # We exclude long-term idle users, since they by
             # definition have no active clients.
             subs = subs.exclude(user_profile__long_term_idle=True)
-            # Remove duplicates by excluding the id of users already
-            # in users_to_be_notified list.  This is the case where a
-            # user both has a UserMessage row and is a current
-            # Subscriber
-            subs = subs.exclude(
-                user_profile_id__in=[um.user_profile_id for um in unmodified_user_messages]
-            )
+            # Remove duplicates by excluding users already in
+            # users_to_be_notified.  This is the case where a user both
+            # has a UserMessage row and is a current Subscriber.
+            subs = subs.exclude(user_profile_id__in=[user["id"] for user in users_to_be_notified])
 
             if message_edit_request.is_stream_edited:
                 subs = subs.exclude(user_profile__in=users_losing_access)
@@ -1293,7 +1373,7 @@ def do_update_message(
                 target_stream=target_stream,
                 target_topic_name=target_topic_name,
                 target_topic_has_messages=target_topic_has_messages,
-                users_losing_access=users_losing_access,
+                remove_orig_topic_visibility_policy=True,
             )
         )
 
@@ -1304,6 +1384,21 @@ def do_update_message(
         target_topic = message_edit_request.target_topic_name
 
         assert target_stream.recipient_id is not None
+
+        participant_user_ids_in_moved_messages = get_participant_user_ids_in_moved_messages(
+            changed_message_ids
+        )
+
+        update_user_topic_visibility_policies_on_move(
+            is_stream_edited=message_edit_request.is_stream_edited,
+            stream_being_edited=stream_being_edited,
+            orig_topic_name=orig_topic_name,
+            target_stream=target_stream,
+            target_topic_name=target_topic,
+            target_topic_has_messages=target_topic_has_messages,
+            remove_orig_topic_visibility_policy=False,
+            filter_to_user_ids=participant_user_ids_in_moved_messages,
+        )
 
         messages_in_target_topic = messages_for_topic(
             realm.id, target_stream.recipient_id, target_topic
