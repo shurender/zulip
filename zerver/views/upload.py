@@ -124,8 +124,6 @@ def serve_s3(
     # get the _unescaped_ new internal request URL in nginx.
     parsed_url = urlsplit(url)
     assert parsed_url.hostname is not None
-    assert parsed_url.path is not None
-    assert parsed_url.query is not None
     escaped_path_parts = parsed_url.hostname + quote(parsed_url.path) + "?" + parsed_url.query
     response = internal_nginx_redirect("/internal/s3/" + escaped_path_parts)
 
@@ -397,7 +395,7 @@ def get_file_path_id_from_token(token: str) -> str | None:
         path_id = signer.unsign(
             signed_data, max_age=timedelta(seconds=settings.SIGNED_ACCESS_TOKEN_VALIDITY_IN_SECONDS)
         )
-    except (BadSignature, binascii.Error):
+    except (BadSignature, UnicodeDecodeError, binascii.Error):
         return None
 
     return path_id

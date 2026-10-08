@@ -473,52 +473,69 @@ export type TopicLink = {
 
 const NO_MESSAGE_ID = 0;
 
+function get_link_map_for_narrow<T>(
+    map: Map<number, Map<string, Map<number, T[]>>>,
+    stream_id: number,
+    topic: string,
+): Map<number, T[]> | undefined {
+    return map.get(stream_id)?.get(topic.toLowerCase());
+}
+
 function get_or_create_link_map_for_narrow<T>(
     map: Map<number, Map<string, Map<number, T[]>>>,
     stream_id: number,
     topic: string,
 ): Map<number, T[]> {
+    const narrow_map = get_link_map_for_narrow(map, stream_id, topic);
+    if (narrow_map !== undefined) {
+        return narrow_map;
+    }
     if (!map.has(stream_id)) {
         map.set(stream_id, new Map<string, Map<number, T[]>>());
     }
-    if (!map.get(stream_id)!.get(topic)) {
-        map.get(stream_id)!.set(topic, new Map<number, T[]>());
-    }
-    return map.get(stream_id)!.get(topic)!;
+    const new_narrow_map = new Map<number, T[]>();
+    map.get(stream_id)!.set(topic.toLowerCase(), new_narrow_map);
+    return new_narrow_map;
 }
 
-// from_stream_id -> from_topic -> from_message_id -> TopicLink[]
-const topic_links_by_from = new Map<number, Map<string, Map<number, TopicLink[]>>>();
-export function topic_links_by_from_for_testing(): Map<
+// Topic names are case-insensitive, so both link maps are keyed by
+// lowercased topic name.
+//
+// from_stream_id -> lowercased from_topic -> from_message_id -> TopicLink[]
+const topic_links_outgoing = new Map<number, Map<string, Map<number, TopicLink[]>>>();
+export function topic_links_outgoing_for_testing(): Map<
     number,
     Map<string, Map<number, TopicLink[]>>
 > {
-    return topic_links_by_from;
+    return topic_links_outgoing;
 }
 
-// to_stream_id -> to_topic -> to_message_id -> from_message_id[]
+// to_stream_id -> lowercased to_topic -> to_message_id -> from_message_id[]
 // Instead of storing a TopicLink, this only stores the from_message_id
 // since we can get that message's narrow data from its id.
-const topic_links_by_to = new Map<number, Map<string, Map<number, number[]>>>();
-export function topic_links_by_to_for_testing(): Map<number, Map<string, Map<number, number[]>>> {
-    return topic_links_by_to;
+const topic_links_incoming = new Map<number, Map<string, Map<number, number[]>>>();
+export function topic_links_incoming_for_testing(): Map<
+    number,
+    Map<string, Map<number, number[]>>
+> {
+    return topic_links_incoming;
 }
 
 export function clear_topic_links_for_testing(): void {
-    topic_links_by_from.clear();
-    topic_links_by_to.clear();
+    topic_links_outgoing.clear();
+    topic_links_incoming.clear();
 }
 
 // Returns the cross-conversation links found in this narrow, resolved to
 // each target's current location. The popover view turns these into the
 // render context for the channel-icon link templates.
 export function topic_links_from_narrow(stream_id: number, topic: string): TopicLink[] {
-    const narrow_map = topic_links_by_from.get(stream_id)?.get(topic);
+    const narrow_map = get_link_map_for_narrow(topic_links_outgoing, stream_id, topic);
     if (narrow_map === undefined) {
         return [];
     }
 
-    // `topic_links_by_from` stores messages by the order they're inserted,
+    // `topic_links_outgoing` stores messages by the order they're inserted,
     // which is the order they're fetched from the server, which isn't necessarily
     // by most recent, e.g. if a user fetches scrolls back in a conversation to
     // load more messages. So now we sort them, but we can sort by ID instead of
@@ -550,10 +567,10 @@ export function topic_links_from_narrow(stream_id: number, topic: string): Topic
             }
             // Hide links from this topic to the same topic, since those feel
             // unnecessary to reference.
-            if (target.stream_id === stream_id && target.topic === topic) {
+            if (target.stream_id === stream_id && util.lower_same(target.topic, topic)) {
                 continue;
             }
-            const link_string = JSON.stringify(target);
+            const link_string = JSON.stringify({...target, topic: target.topic.toLowerCase()});
             if (added_links.has(link_string)) {
                 continue;
             }
@@ -566,12 +583,12 @@ export function topic_links_from_narrow(stream_id: number, topic: string): Topic
 }
 
 export function topic_links_to_narrow(stream_id: number, topic: string): TopicLink[] {
-    const narrow_map = topic_links_by_to.get(stream_id)?.get(topic);
+    const narrow_map = get_link_map_for_narrow(topic_links_incoming, stream_id, topic);
     if (narrow_map === undefined) {
         return [];
     }
 
-    // `topic_links_by_to` stores messages by the order they're inserted,
+    // `topic_links_incoming` stores messages by the order they're inserted,
     // which is the order they're fetched from the server, which isn't necessarily
     // by most recent, e.g. if a user fetches scrolls back in a conversation to
     // load more messages. So now we sort them, but we can sort by ID instead of
@@ -595,10 +612,13 @@ export function topic_links_to_narrow(stream_id: number, topic: string): TopicLi
         assert(message?.type === "stream");
         // Hide links to this topic from the same topic, since those feel
         // unnecessary to reference.
-        if (message.stream_id === stream_id && message.topic === topic) {
+        if (message.stream_id === stream_id && util.lower_same(message.topic, topic)) {
             continue;
         }
-        const stream_topic = JSON.stringify({stream_id: message.stream_id, topic: message.topic});
+        const stream_topic = JSON.stringify({
+            stream_id: message.stream_id,
+            topic: message.topic.toLowerCase(),
+        });
         if (added_narrows.has(stream_topic)) {
             continue;
         }
@@ -610,6 +630,103 @@ export function topic_links_to_narrow(stream_id: number, topic: string): TopicLi
         });
     }
     return topic_links_content;
+}
+
+function update_or_remove_links_to_message(
+    stream_id: number,
+    topic: string,
+    old_message_id: number,
+    new_message_id: number | undefined,
+): void {
+    const links_to_narrow = get_link_map_for_narrow(topic_links_incoming, stream_id, topic);
+    if (links_to_narrow?.has(old_message_id)) {
+        // Update records in `topic_links_incoming` for messages pointing to the message
+        // we're updating.
+        const messages_linking_to_updated_message = links_to_narrow.get(old_message_id)!;
+        links_to_narrow.delete(old_message_id);
+        // If we're updating the message id, save this data under the new message id.
+        if (new_message_id) {
+            links_to_narrow.set(
+                new_message_id,
+                // Handle edge case where messages_linking_to_updated_message contains
+                // the old_message_id - we need to update it to be the new_message_id.
+                messages_linking_to_updated_message.map((message_id) =>
+                    message_id === old_message_id ? new_message_id : message_id,
+                ),
+            );
+        }
+
+        // Update/delete the matching links in `topic_links_outgoing`
+        // i.e. links from messages to this updated message, since they need
+        // to point to the correct new message id.
+        for (const message_id of messages_linking_to_updated_message) {
+            const message = get(message_id);
+            assert(message?.type === "stream");
+            const links_from_narrow = get_link_map_for_narrow(
+                topic_links_outgoing,
+                message.stream_id,
+                message.topic,
+            )!;
+            const links = links_from_narrow.get(message.id)!;
+            if (new_message_id) {
+                for (const link of links) {
+                    if (link.message_id === old_message_id) {
+                        link.message_id = new_message_id;
+                    }
+                }
+            } else {
+                // An undefined new_message_id means we're deleting the old message id
+                // from the links.
+                const filtered_links = links.filter(
+                    (topic_link) => topic_link.message_id !== old_message_id,
+                );
+                links_from_narrow.set(message_id, filtered_links);
+            }
+        }
+    }
+}
+
+function update_or_remove_links_from_message(
+    stream_id: number,
+    topic: string,
+    old_message_id: number,
+    new_message_id: number | undefined,
+): void {
+    const links_from_narrow = get_link_map_for_narrow(topic_links_outgoing, stream_id, topic);
+    if (links_from_narrow?.has(old_message_id)) {
+        // Update records in `topic_links_outgoing` from message we're updating.
+        const messages_linked_from_updated_message = links_from_narrow.get(old_message_id)!;
+        links_from_narrow.delete(old_message_id);
+        if (new_message_id) {
+            links_from_narrow.set(new_message_id, messages_linked_from_updated_message);
+        }
+
+        // Delete matching records in `topic_links_incoming`,
+        // i.e. links to messages from this updated message, since they need
+        // to store correct new message id.
+        for (const link of messages_linked_from_updated_message) {
+            // If there's no specified `to_message_id`, it was a link to a topic
+            // but not a specific message. That uses `NO_MESSAGE_ID`.
+            const to_message_id = link.message_id ?? NO_MESSAGE_ID;
+            const to_message = link.message_id === undefined ? undefined : get(link.message_id);
+            const to_narrow = to_message?.type === "stream" ? to_message : link;
+            const link_map = get_link_map_for_narrow(
+                topic_links_incoming,
+                to_narrow.stream_id,
+                to_narrow.topic,
+            );
+            if (link_map?.has(to_message_id)) {
+                const links_to_message = link_map.get(to_message_id)!;
+                if (new_message_id) {
+                    links_to_message.push(new_message_id);
+                }
+                link_map.set(
+                    to_message_id,
+                    links_to_message.filter((message_id) => message_id !== old_message_id),
+                );
+            }
+        }
+    }
 }
 
 // If new_message_id = undefined, the message has been deleted, so remove
@@ -628,86 +745,8 @@ function _remove_or_update_message_id_from_topic_links(
     }
 
     const {stream_id, topic} = updated_message;
-
-    // (1) Update any record of links to this message.
-    const links_to_narrow = topic_links_by_to.get(stream_id)?.get(topic);
-    if (links_to_narrow?.has(old_message_id)) {
-        // (1a) Update records in `topic_links_by_to` for messages pointing to the message
-        // we're updating.
-        const messages_linking_to_updated_message = links_to_narrow.get(old_message_id)!;
-        links_to_narrow.delete(old_message_id);
-        // If we're updating the message id, save this data under the new message id.
-        if (new_message_id) {
-            links_to_narrow.set(
-                new_message_id,
-                // Handle edge case where messages_linking_to_updated_message contains
-                // the old_message_id - we need to update it to be the new_message_id.
-                messages_linking_to_updated_message.map((message_id) =>
-                    message_id === old_message_id ? new_message_id : message_id,
-                ),
-            );
-        }
-
-        // (1b) Update/delete the matching links in `topic_links_by_from`
-        // i.e. links from messages to this updated message, since they need
-        // to point to the correct new message id.
-        for (const message_id of messages_linking_to_updated_message) {
-            const message = get(message_id);
-            assert(message?.type === "stream");
-            const links = topic_links_by_from
-                .get(message.stream_id)!
-                .get(message.topic)!
-                .get(message.id)!;
-            if (new_message_id) {
-                for (const link of links) {
-                    if (link.message_id === old_message_id) {
-                        link.message_id = new_message_id;
-                    }
-                }
-            } else {
-                // An undefined new_message_id means we're deleting the old message id
-                // from the links.
-                const filtered_links = links.filter(
-                    (topic_link) => topic_link.message_id !== old_message_id,
-                );
-                topic_links_by_from
-                    .get(message.stream_id)!
-                    .get(message.topic)!
-                    .set(message_id, filtered_links);
-            }
-        }
-    }
-
-    // (2) Update links from this message to other streams/topics/messages.
-    const links_from_narrow = topic_links_by_from.get(stream_id)?.get(topic);
-    if (links_from_narrow?.has(old_message_id)) {
-        // (2a) Update records in `topic_links_by_from` from message we're updating.
-        const messages_linked_from_updated_message = links_from_narrow.get(old_message_id)!;
-        links_from_narrow.delete(old_message_id);
-        if (new_message_id) {
-            links_from_narrow.set(new_message_id, messages_linked_from_updated_message);
-        }
-
-        // (2b) Delete matching records in `topic_links_by_to`,
-        // i.e. links to messages from this updated message, since they need
-        // to store correct new message id.
-        for (const link of messages_linked_from_updated_message) {
-            // If there's no specified `to_message_id`, it was a link to a topic
-            // but not a specific message. That uses `NO_MESSAGE_ID`.
-            const to_message_id = link.message_id ?? NO_MESSAGE_ID;
-            const link_map = topic_links_by_to.get(link.stream_id)?.get(link.topic);
-            if (link_map?.has(to_message_id)) {
-                const links_to_message = link_map.get(to_message_id)!;
-                if (new_message_id) {
-                    links_to_message.push(new_message_id);
-                }
-                link_map.set(
-                    to_message_id,
-                    links_to_message.filter((message_id) => message_id !== old_message_id),
-                );
-            }
-        }
-    }
+    update_or_remove_links_to_message(stream_id, topic, old_message_id, new_message_id);
+    update_or_remove_links_from_message(stream_id, topic, old_message_id, new_message_id);
 }
 
 function update_message_id_in_topic_links(old_message_id: number, new_message_id: number): void {
@@ -746,8 +785,8 @@ export function save_topic_links(message: Message): void {
             continue;
         }
 
-        const to_stream_id = link_data.stream_id;
-        const to_topic = link_data.topic_name;
+        let to_stream_id = link_data.stream_id;
+        let to_topic = link_data.topic_name;
         const to_message_id = link_data.message_id
             ? Number.parseInt(link_data.message_id, 10)
             : undefined;
@@ -760,19 +799,25 @@ export function save_topic_links(message: Message): void {
 
         // If we don't have access to this stream and/or message, or it's a buggy link,
         // or it's a message from a muted user, just ignore it.
+        if (to_message_id !== undefined) {
+            const to_message = get(to_message_id);
+            if (
+                to_message === undefined ||
+                muted_users.is_user_muted(to_message.sender_id) ||
+                to_message.type !== "stream"
+            ) {
+                continue;
+            }
+            to_stream_id = to_message.stream_id;
+            to_topic = to_message.topic;
+        }
         if (!stream_data.get_sub_by_id(to_stream_id)) {
             continue;
         }
-        if (to_message_id !== undefined) {
-            const to_message = get(to_message_id);
-            if (to_message === undefined || muted_users.is_user_muted(to_message.sender_id)) {
-                continue;
-            }
-        }
 
-        // (1) Save link in topic_links_by_from
+        // (1) Save link in topic_links_outgoing
         const topic_links_from_message_narrow = get_or_create_link_map_for_narrow(
-            topic_links_by_from,
+            topic_links_outgoing,
             message.stream_id,
             message.topic,
         );
@@ -785,9 +830,9 @@ export function save_topic_links(message: Message): void {
         });
         topic_links_from_message_narrow.set(message.id, topic_links_from_message);
 
-        // (2) Save link in topic_links_by_to
+        // (2) Save link in topic_links_incoming
         const topic_links_to_message_narrow = get_or_create_link_map_for_narrow(
-            topic_links_by_to,
+            topic_links_incoming,
             to_stream_id,
             to_topic,
         );
@@ -818,13 +863,22 @@ export function process_topic_edit(opts: {
         }
         const old_stream_id = message.stream_id;
         const old_topic = message.topic;
+        if (old_stream_id === new_stream_id && util.lower_same(old_topic, new_topic)) {
+            // The narrow's key is unchanged, so its entries are already
+            // in the right place.
+            continue;
+        }
 
         // Move any links from this message stored with the old topic
-        const links_from_old_narrow = topic_links_by_from.get(old_stream_id)?.get(old_topic);
+        const links_from_old_narrow = get_link_map_for_narrow(
+            topic_links_outgoing,
+            old_stream_id,
+            old_topic,
+        );
         const links_from_edited_message = links_from_old_narrow?.get(message_id);
         if (links_from_edited_message !== undefined) {
             const new_narrow_link_map = get_or_create_link_map_for_narrow(
-                topic_links_by_from,
+                topic_links_outgoing,
                 new_stream_id,
                 new_topic,
             );
@@ -833,11 +887,15 @@ export function process_topic_edit(opts: {
         }
 
         // Move any links to this message stored with the old topic
-        const links_to_old_narrow = topic_links_by_to.get(old_stream_id)?.get(old_topic);
+        const links_to_old_narrow = get_link_map_for_narrow(
+            topic_links_incoming,
+            old_stream_id,
+            old_topic,
+        );
         const links_to_edited_message = links_to_old_narrow?.get(message_id);
         if (links_to_edited_message !== undefined) {
             const new_narrow_link_map = get_or_create_link_map_for_narrow(
-                topic_links_by_to,
+                topic_links_incoming,
                 new_stream_id,
                 new_topic,
             );
@@ -863,8 +921,10 @@ export function update_message_content(
     // the content and update the map. A prior check to see if anything
     // changed takes a comparable amount of time (recalculating the topic
     // links, and sorting them to compare to current links), so it's easier
-    // to just wipe the data and recalculate.
-    remove_message_from_topic_links(message.id);
+    // to just wipe this message's outgoing links and recalculate them.
+    // Incoming links from other messages don't depend on this message's
+    // content, so they stay as they are.
+    update_or_remove_links_from_message(message.stream_id, message.topic, message.id, undefined);
     save_topic_links(message);
 }
 

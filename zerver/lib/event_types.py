@@ -214,20 +214,20 @@ class DraftFields(DraftFieldsCore):
 
 
 class DraftsAddEvent(BaseEvent):
-    type: Literal["drafts"]
-    op: Literal["add"]
+    type: Literal["drafts"] = "drafts"
+    op: Literal["add"] = "add"
     drafts: list[DraftFields]
 
 
 class DraftsRemoveEvent(BaseEvent):
-    type: Literal["drafts"]
-    op: Literal["remove"]
+    type: Literal["drafts"] = "drafts"
+    op: Literal["remove"] = "remove"
     draft_id: int
 
 
 class DraftsUpdateEvent(BaseEvent):
-    type: Literal["drafts"]
-    op: Literal["update"]
+    type: Literal["drafts"] = "drafts"
+    op: Literal["update"] = "update"
     draft: DraftFields
 
 
@@ -246,7 +246,7 @@ class HeartbeatEvent(BaseEvent):
 
 
 class InvitesChangedEvent(BaseEvent):
-    type: Literal["invites_changed"]
+    type: Literal["invites_changed"] = "invites_changed"
 
 
 class MessageFieldForMessageEvent(BaseEventModel):
@@ -458,8 +458,8 @@ class RealmBotUpdateEvent(BaseEvent):
 
 
 class RealmDeactivatedEvent(BaseEvent):
-    type: Literal["realm"]
-    op: Literal["deactivated"]
+    type: Literal["realm"] = "realm"
+    op: Literal["deactivated"] = "deactivated"
     realm_id: int
 
 
@@ -519,7 +519,7 @@ class RealmEmojiUpdateEvent(BaseEvent):
 
 
 class RealmExportConsentEvent(BaseEvent):
-    type: Literal["realm_export_consent"]
+    type: Literal["realm_export_consent"] = "realm_export_consent"
     user_id: int
     consented: bool
 
@@ -672,8 +672,8 @@ class RealmUpdateDictEvent(BaseEvent):
 
 
 class RealmUpdateEvent(BaseEvent):
-    type: Literal["realm"]
-    op: Literal["update"]
+    type: Literal["realm"] = "realm"
+    op: Literal["update"] = "update"
     property: str
     value: bool | int | str | None
     rendered_description: str | None = None
@@ -723,14 +723,14 @@ class RemovedUser(BaseEventModel):
 
 
 class RealmUserRemoveEvent(BaseEvent):
-    type: Literal["realm_user"]
-    op: Literal["remove"]
+    type: Literal["realm_user"] = "realm_user"
+    op: Literal["remove"] = "remove"
     person: RemovedUser
 
 
 class RealmUserSettingsDefaultsUpdateEvent(BaseEvent):
-    type: Literal["realm_user_settings_defaults"]
-    op: Literal["update"]
+    type: Literal["realm_user_settings_defaults"] = "realm_user_settings_defaults"
+    op: Literal["update"] = "update"
     property: str
     value: bool | int | str
 
@@ -961,8 +961,8 @@ class StreamDeleteEvent(BaseEvent):
 
 
 class StreamUpdateCoreEvent(BaseEvent):
-    type: Literal["stream"]
-    op: Literal["update"]
+    type: Literal["stream"] = "stream"
+    op: Literal["update"] = "update"
     property: str
     value: bool | int | str | UserGroupMembersDict | None
     name: str
@@ -1030,21 +1030,21 @@ class SingleSubscription(BaseEventModel):
 
 
 class SubscriptionAddEvent(BaseEvent):
-    type: Literal["subscription"]
-    op: Literal["add"]
+    type: Literal["subscription"] = "subscription"
+    op: Literal["add"] = "add"
     subscriptions: list[SingleSubscription]
 
 
 class SubscriptionPeerAddEvent(BaseEvent):
-    type: Literal["subscription"]
-    op: Literal["peer_add"]
+    type: Literal["subscription"] = "subscription"
+    op: Literal["peer_add"] = "peer_add"
     user_ids: list[int]
     stream_ids: list[int]
 
 
 class SubscriptionPeerRemoveEvent(BaseEvent):
-    type: Literal["subscription"]
-    op: Literal["peer_remove"]
+    type: Literal["subscription"] = "subscription"
+    op: Literal["peer_remove"] = "peer_remove"
     user_ids: list[int]
     stream_ids: list[int]
 
@@ -1055,14 +1055,14 @@ class RemoveSub(BaseEventModel):
 
 
 class SubscriptionRemoveEvent(BaseEvent):
-    type: Literal["subscription"]
-    op: Literal["remove"]
+    type: Literal["subscription"] = "subscription"
+    op: Literal["remove"] = "remove"
     subscriptions: list[RemoveSub]
 
 
 class SubscriptionUpdateEvent(BaseEvent):
-    type: Literal["subscription"]
-    op: Literal["update"]
+    type: Literal["subscription"] = "subscription"
+    op: Literal["update"] = "update"
     property: str
     stream_id: int
     value: bool | int | str
@@ -1208,42 +1208,48 @@ class Group(BaseEventModel):
     deactivated: bool
 
 
+class UrlEmbedDataEvent(BaseEvent):
+    type: Literal["url_embed_data"]
+    content: str
+    rendered_content: str
+
+
 class UserGroupAddEvent(BaseEvent):
-    type: Literal["user_group"]
-    op: Literal["add"]
+    type: Literal["user_group"] = "user_group"
+    op: Literal["add"] = "add"
     group: Group
 
 
 class UserGroupAddMembersEvent(BaseEvent):
-    type: Literal["user_group"]
-    op: Literal["add_members"]
+    type: Literal["user_group"] = "user_group"
+    op: Literal["add_members"] = "add_members"
     group_id: int
     user_ids: list[int]
 
 
 class UserGroupAddSubgroupsEvent(BaseEvent):
-    type: Literal["user_group"]
-    op: Literal["add_subgroups"]
+    type: Literal["user_group"] = "user_group"
+    op: Literal["add_subgroups"] = "add_subgroups"
     group_id: int
     direct_subgroup_ids: list[int]
 
 
 class UserGroupRemoveEvent(BaseEvent):
-    type: Literal["user_group"]
-    op: Literal["remove"]
+    type: Literal["user_group"] = "user_group"
+    op: Literal["remove"] = "remove"
     group_id: int
 
 
 class UserGroupRemoveMembersEvent(BaseEvent):
-    type: Literal["user_group"]
-    op: Literal["remove_members"]
+    type: Literal["user_group"] = "user_group"
+    op: Literal["remove_members"] = "remove_members"
     group_id: int
     user_ids: list[int]
 
 
 class UserGroupRemoveSubgroupsEvent(BaseEvent):
-    type: Literal["user_group"]
-    op: Literal["remove_subgroups"]
+    type: Literal["user_group"] = "user_group"
+    op: Literal["remove_subgroups"] = "remove_subgroups"
     group_id: int
     direct_subgroup_ids: list[int]
 
@@ -1266,15 +1272,15 @@ class UserGroupData(UserGroupDataCore):
 
 
 class UserGroupUpdateEvent(BaseEvent):
-    type: Literal["user_group"]
-    op: Literal["update"]
+    type: Literal["user_group"] = "user_group"
+    op: Literal["update"] = "update"
     group_id: int
     data: UserGroupData
 
 
 class UserSettingsUpdateCoreEvent(BaseEvent):
-    type: Literal["user_settings"]
-    op: Literal["update"]
+    type: Literal["user_settings"] = "user_settings"
+    op: Literal["update"] = "update"
     property: str
     value: bool | int | str
 

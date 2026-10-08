@@ -10,6 +10,7 @@ from django.utils.timezone import now as timezone_now
 from django.utils.translation import gettext as _
 
 from zerver.lib.default_streams import get_default_stream_ids_for_realm
+from zerver.lib.event_types import StreamUpdateEvent
 from zerver.lib.exceptions import (
     CannotAdministerChannelError,
     CannotSetTopicsPolicyError,
@@ -308,15 +309,15 @@ def get_users_dict_with_metadata_access_to_streams_via_permission_groups(
     recursive_subgroups = get_root_id_annotated_recursive_subgroups_for_groups(
         all_permission_group_ids, realm_id
     )
-    subgroup_root_id_dict = {}
-    all_subgroup_ids = set()
+    # A group can be a subgroup of several permission groups, so map
+    # each subgroup to every root it is reachable from.
+    subgroup_root_ids_dict: dict[int, set[int]] = defaultdict(set)
     for group in recursive_subgroups:
-        subgroup_root_id_dict[group.id] = group.root_id  # type: ignore[attr-defined]  # root_id is an annotated field.
-        all_subgroup_ids.add(group.id)
+        subgroup_root_ids_dict[group.id].add(group.root_id)  # type: ignore[attr-defined]  # root_id is an annotated field.
 
     group_members = (
         UserGroupMembership.objects.filter(
-            user_group_id__in=list(all_subgroup_ids), user_profile__is_active=True
+            user_group_id__in=list(subgroup_root_ids_dict), user_profile__is_active=True
         )
         .exclude(
             # allow_everyone_group=False is false for both
@@ -329,8 +330,8 @@ def get_users_dict_with_metadata_access_to_streams_via_permission_groups(
     )
     group_members_dict = defaultdict(set)
     for user_group_id, user_profile_id in group_members:
-        root_id = subgroup_root_id_dict[user_group_id]
-        group_members_dict[root_id].add(user_profile_id)
+        for root_id in subgroup_root_ids_dict[user_group_id]:
+            group_members_dict[root_id].add(user_profile_id)
 
     users_with_metadata_access_dict = defaultdict(set)
     for stream in streams:
@@ -565,9 +566,7 @@ def is_user_in_can_administer_channel_group(
     # Important: The caller must have verified the acting user is not
     # a guest, to enforce that can_administer_channel_group has
     # allow_everyone_group=False.
-    group_allowed_to_administer_channel_id = stream.can_administer_channel_group_id
-    assert group_allowed_to_administer_channel_id is not None
-    return group_allowed_to_administer_channel_id in user_recursive_group_ids
+    return stream.can_administer_channel_group_id in user_recursive_group_ids
 
 
 def is_user_in_can_add_subscribers_group(
@@ -576,9 +575,7 @@ def is_user_in_can_add_subscribers_group(
     # Important: The caller must have verified the acting user is not
     # a guest, to enforce that can_add_subscribers_group has
     # allow_everyone_group=False.
-    group_allowed_to_add_subscribers_id = stream.can_add_subscribers_group_id
-    assert group_allowed_to_add_subscribers_id is not None
-    return group_allowed_to_add_subscribers_id in user_recursive_group_ids
+    return stream.can_add_subscribers_group_id in user_recursive_group_ids
 
 
 def is_user_in_can_subscribe_group(stream: Stream, user_recursive_group_ids: set[int]) -> bool:
@@ -606,9 +603,7 @@ def is_user_in_can_remove_subscribers_group(
     # Important: The caller must have verified the acting user is not
     # a guest, to enforce that can_remove_subscribers_group has
     # allow_everyone_group=False.
-    group_allowed_to_remove_subscribers_id = stream.can_remove_subscribers_group_id
-    assert group_allowed_to_remove_subscribers_id is not None
-    return group_allowed_to_remove_subscribers_id in user_recursive_group_ids
+    return stream.can_remove_subscribers_group_id in user_recursive_group_ids
 
 
 def check_stream_access_based_on_can_send_message_group(
@@ -1461,10 +1456,8 @@ def get_streams_to_which_user_cannot_add_subscribers(
 def can_administer_accessible_channel(channel: Stream, user_profile: UserProfile) -> bool:
     # IMPORTANT: This function expects its callers to have already
     # checked that the user can access the provided channel.
-    group_id_allowed_to_administer_channel = channel.can_administer_channel_group_id
-    assert group_id_allowed_to_administer_channel is not None
     return user_has_permission_for_group_setting(
-        group_id_allowed_to_administer_channel,
+        channel.can_administer_channel_group_id,
         user_profile,
         Stream.stream_permission_group_settings["can_administer_channel_group"],
     )
@@ -2121,9 +2114,7 @@ def do_get_streams(
 
 
 def notify_stream_is_recently_active_update(stream: Stream, value: bool) -> None:
-    event = dict(
-        type="stream",
-        op="update",
+    event = StreamUpdateEvent(
         property="is_recently_active",
         value=value,
         stream_id=stream.id,
