@@ -545,9 +545,14 @@ export class Filter {
     }
 
     static convert_term_to_suggestion(term: NarrowCanonicalTerm): NarrowTermSuggestion {
+        // There is no search syntax for an unknown user, so the
+        // operand is left for the user to fill in.
+        const has_unknown_user =
+            term.operand === filter_util.UNKNOWN_USER_ID ||
+            (Array.isArray(term.operand) && term.operand.includes(filter_util.UNKNOWN_USER_ID));
         return {
             operator: term.operator,
-            operand: String(term.operand),
+            operand: has_unknown_user ? "" : String(term.operand),
             negated: term.negated,
         };
     }
@@ -1598,6 +1603,9 @@ export class Filter {
             const names = user_ids.map((user_id) => {
                 const person = people.maybe_get_user_by_id(user_id, ignore_missing);
                 if (!person) {
+                    if (user_id === filter_util.UNKNOWN_USER_ID) {
+                        return people.INACCESSIBLE_USER_NAME;
+                    }
                     return $t({defaultMessage: "Unknown user ({user_id})"}, {user_id});
                 }
                 if (muted_users.is_user_muted(person.user_id)) {
