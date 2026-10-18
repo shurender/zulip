@@ -344,9 +344,8 @@ function handle_post_message_list_change(
 }
 
 function get_selected_message_top_offset(is_first_message_in_narrow = false): number {
-    const navbar_height = $("#navbar-fixed-container").height()!;
     let final_offset =
-        navbar_height +
+        message_viewport.message_feed_visible_top() +
         // Falls back to 30px height + 10px top margin if no sticky header is present.
         ($(".message_header").outerHeight(true) ?? 40);
 
@@ -355,8 +354,8 @@ function get_selected_message_top_offset(is_first_message_in_narrow = false): nu
     // the top of the message and the sticky header.
     if (is_first_message_in_narrow) {
         final_offset +=
-            ($("#message_feed_errors_container").outerHeight(true) ?? 0) +
-            ($(".top-messages-logo").outerHeight(true) ?? 0);
+            ($("#top-of-feed-gutter").outerHeight(true) ?? 0) +
+            ($("#message_feed_errors_container").outerHeight(true) ?? 0);
     }
     return final_offset;
 }
