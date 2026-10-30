@@ -156,7 +156,7 @@ COMMON_YUM_DEPENDENCIES = [
 ]
 
 BUILD_PGROONGA_FROM_SOURCE = False
-if (vendor == "debian" and os_version == "13") or (vendor == "ubuntu" and os_version == "26.04"):
+if (vendor == "debian" and os_version in []) or (vendor == "ubuntu" and os_version in []):  # noqa: RUF060
     # For platforms without a PGroonga release, we need to build it
     # from source.
     BUILD_PGROONGA_FROM_SOURCE = True
@@ -177,6 +177,12 @@ elif "debian" in os_families():
     # so cmake is required
     if platform.machine() == "aarch64":
         DEBIAN_DEPENDENCIES.append("cmake")
+
+    if vendor == "debian" and os_version == "13":
+        # libarrow2600 from packages.groonga.org links against
+        # opentelemetry-cpp without depending on it; see
+        # https://github.com/apache/arrow/issues/55112
+        DEBIAN_DEPENDENCIES.append("opentelemetry-cpp")
 
     SYSTEM_DEPENDENCIES = [
         *DEBIAN_DEPENDENCIES,
